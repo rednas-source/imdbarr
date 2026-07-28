@@ -1,0 +1,44 @@
+{
+  "bind": "0.0.0.0",
+  "port": 8586,
+
+  "refresh_interval_minutes": 360,
+
+  "tmdb_api_key": "PUT_YOUR_TMDB_API_KEY_HERE",
+
+  "lists": [
+    {
+      "name": "Movies",
+      "path": "movies",
+      "url": "https://www.imdb.com/list/ls4179821413/",
+      "type": "movie",
+      "enabled": true
+    },
+    {
+      "name": "Anime - Series",
+      "path": "anime-series",
+      "url": "https://www.imdb.com/list/ls4179821814/",
+      "type": "series",
+      "enabled": true
+    },
+    {
+      "name": "TV Shows",
+      "path": "tv-shows",
+      "url": "https://www.imdb.com/list/ls4179821216/",
+      "type": "series",
+      "enabled": true
+    },
+    {
+      "name": "Anime Movies",
+      "path": "anime-movies",
+      "url": "https://www.imdb.com/list/ls4179983344/",
+      "type": "movie",
+      "enabled": true
+    }
+  ],
+
+  "max_pages_per_list": 20,
+  "page_delay_seconds": 2.0,
+  "tmdb_delay_seconds": 0.06,
+  "tmdb_language": "en-US"
+}

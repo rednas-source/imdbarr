@@ -1,0 +1,23 @@
+[Unit]
+Description=imdbarr - IMDb lists as Radarr/Sonarr custom lists
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=imdbarr
+Group=imdbarr
+WorkingDirectory=/opt/imdbarr
+ExecStart=/usr/bin/python3 /opt/imdbarr/imdbarr.py
+Restart=on-failure
+RestartSec=15
+
+# hardening - it only needs to read its own directory and talk to the network
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/imdbarr/data
+
+[Install]
+WantedBy=multi-user.target
