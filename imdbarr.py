@@ -68,7 +68,8 @@ def load_config(path):
     cfg.setdefault("data_dir", os.path.join(BASE_DIR, "data"))
     cfg.setdefault("max_pages_per_list", 20)
     cfg.setdefault("page_delay_seconds", 2.0)
-    cfg.setdefault("tmdb_delay_seconds", 0.06)
+    cfg.setdefault("resolver", "arr")
+    cfg.setdefault("lookup_delay_seconds", 0.05)
     cfg.setdefault("tmdb_language", "en-US")
     cfg.setdefault(
         "user_agent",
@@ -76,10 +77,16 @@ def load_config(path):
         "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     )
 
-    if not cfg.get("tmdb_api_key"):
+    cfg["resolver"] = str(cfg["resolver"]).lower()
+    if cfg["resolver"] not in ("arr", "tmdb"):
         raise SystemExit(
-            "config error: tmdb_api_key is required.\n"
-            "Get a free key at https://www.themoviedb.org/settings/api"
+            "config error: resolver must be 'arr' (ask Radarr/Sonarr) or 'tmdb'"
+        )
+
+    if cfg["resolver"] == "tmdb" and not cfg.get("tmdb_api_key"):
+        raise SystemExit(
+            "config error: resolver is 'tmdb' but tmdb_api_key is not set.\n"
+            "Either add a key, or switch to \"resolver\": \"arr\"."
         )
 
     lists = cfg.get("lists") or []
@@ -119,6 +126,21 @@ def load_config(path):
         if not entry.get("name"):
             entry["name"] = entry["path"]
 
+    if cfg["resolver"] == "arr":
+        needed = {
+            entry["type"] for entry in lists if entry.get("enabled", True)
+        }
+        for kind in sorted(needed):
+            app = "radarr" if kind == "movie" else "sonarr"
+            block = cfg.get(app) or {}
+            if not block.get("url") or not block.get("api_key"):
+                raise SystemExit(
+                    "config error: you have %s list(s), so %r needs a url and "
+                    "api_key.\nFind the key in %s under Settings > General."
+                    % (kind, app, app.title())
+                )
+            block["url"] = block["url"].rstrip("/")
+
     return cfg
 
 
@@ -132,7 +154,7 @@ def slugify(text):
 # ---------------------------------------------------------------------------
 
 
-def http_get(url, user_agent, timeout=30, retries=3, accept="text/html"):
+def http_get(url, user_agent, timeout=30, retries=3, accept="text/html", headers=None):
     last_error = None
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(url)
@@ -140,6 +162,8 @@ def http_get(url, user_agent, timeout=30, retries=3, accept="text/html"):
         req.add_header("Accept", accept)
         req.add_header("Accept-Language", "en-US,en;q=0.9")
         req.add_header("Accept-Encoding", "gzip, identity")
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
@@ -349,7 +373,7 @@ def fetch_imdb_list(list_id, cfg, verbose=False):
 # ---------------------------------------------------------------------------
 
 
-class Resolver:
+class BaseResolver:
     """imdb_id -> {tmdb_id, tvdb_id, title, year}, cached to disk forever."""
 
     def __init__(self, cfg):
@@ -366,16 +390,11 @@ class Resolver:
 
     def save(self):
         tmp = self.path + ".tmp"
+        with self.lock:
+            snapshot = json.dumps(self.cache, indent=2, sort_keys=True)
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(self.cache, fh, indent=2, sort_keys=True)
+            fh.write(snapshot)
         os.replace(tmp, self.path)
-
-    def _api(self, path, params=None):
-        params = dict(params or {})
-        params["api_key"] = self.cfg["tmdb_api_key"]
-        url = "%s%s?%s" % (TMDB_BASE, path, urllib.parse.urlencode(params))
-        body = http_get(url, self.cfg["user_agent"], accept="application/json")
-        return json.loads(body)
 
     def resolve(self, imdb_id, kind):
         key = "%s:%s" % (imdb_id, kind)
@@ -385,9 +404,85 @@ class Resolver:
 
         result = self._resolve_uncached(imdb_id, kind)
         with self.lock:
-            self.cache[key] = result
-        time.sleep(self.cfg["tmdb_delay_seconds"])
+            # Only cache hits. A miss might be a transient outage, and caching
+            # it would silently drop the title from the list forever.
+            if result:
+                self.cache[key] = result
+        time.sleep(self.cfg["lookup_delay_seconds"])
         return result
+
+    def _resolve_uncached(self, imdb_id, kind):
+        raise NotImplementedError
+
+
+class ArrResolver(BaseResolver):
+    """Ask Radarr/Sonarr themselves. No third-party account needed."""
+
+    def _target(self, kind):
+        block = self.cfg.get("radarr" if kind == "movie" else "sonarr") or {}
+        url = (block.get("url") or "").rstrip("/")
+        return url, block.get("api_key"), block.get("timeout_seconds", 30)
+
+    def _lookup(self, kind, term):
+        url, api_key, timeout = self._target(kind)
+        endpoint = "movie" if kind == "movie" else "series"
+        full = "%s/api/v3/%s/lookup?%s" % (
+            url, endpoint, urllib.parse.urlencode({"term": term})
+        )
+        body = http_get(
+            full,
+            self.cfg["user_agent"],
+            timeout=timeout,
+            accept="application/json",
+            headers={"X-Api-Key": api_key},
+        )
+        data = json.loads(body)
+        return data if isinstance(data, list) else []
+
+    def _resolve_uncached(self, imdb_id, kind):
+        results = []
+        # "imdb:tt..." is the documented prefix; the bare id is a fallback for
+        # older builds that parse the term differently.
+        for term in ("imdb:%s" % imdb_id, imdb_id):
+            try:
+                results = self._lookup(kind, term)
+            except Exception as exc:  # noqa: BLE001
+                log("  %s lookup failed for %s: %s",
+                    "radarr" if kind == "movie" else "sonarr", imdb_id, exc)
+                return None
+            if results:
+                break
+
+        if not results:
+            return None
+
+        # Guard against a title-search fallback returning something unrelated.
+        match = next(
+            (item for item in results if item.get("imdbId") == imdb_id), results[0]
+        )
+        if match.get("imdbId") and match.get("imdbId") != imdb_id:
+            return None
+
+        record = {
+            "imdb_id": imdb_id,
+            "title": match.get("title"),
+            "year": match.get("year") or None,
+            "tmdb_id": match.get("tmdbId") or None,
+        }
+        if kind == "series":
+            record["tvdb_id"] = match.get("tvdbId") or None
+        return record
+
+
+class TmdbResolver(BaseResolver):
+    """Fallback backend: resolve via TMDb's API instead of the *arrs."""
+
+    def _api(self, path, params=None):
+        params = dict(params or {})
+        params["api_key"] = self.cfg["tmdb_api_key"]
+        url = "%s%s?%s" % (TMDB_BASE, path, urllib.parse.urlencode(params))
+        body = http_get(url, self.cfg["user_agent"], accept="application/json")
+        return json.loads(body)
 
     def _resolve_uncached(self, imdb_id, kind):
         try:
@@ -432,6 +527,12 @@ class Resolver:
             "title": show.get("name") or show.get("original_name"),
             "year": int(date[:4]) if date[:4].isdigit() else None,
         }
+
+
+def make_resolver(cfg):
+    if cfg["resolver"] == "tmdb":
+        return TmdbResolver(cfg)
+    return ArrResolver(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +913,8 @@ def main():
         debug_list(args.debug_list, cfg)
         return
 
-    resolver = Resolver(cfg)
+    resolver = make_resolver(cfg)
+    log("resolver backend: %s", cfg["resolver"])
     store = Store(cfg)
 
     if args.once:

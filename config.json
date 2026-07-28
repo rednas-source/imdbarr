@@ -4,7 +4,18 @@
 
   "refresh_interval_minutes": 360,
 
-  "tmdb_api_key": "PUT_YOUR_TMDB_API_KEY_HERE",
+  "resolver": "arr",
+
+  "radarr": {
+    "url": "http://192.168.1.50:7878",
+    "api_key": "PUT_YOUR_RADARR_API_KEY_HERE"
+  },
+  "sonarr": {
+    "url": "http://192.168.1.50:8989",
+    "api_key": "PUT_YOUR_SONARR_API_KEY_HERE"
+  },
+
+  "tmdb_api_key": "",
 
   "lists": [
     {
@@ -39,6 +50,6 @@
 
   "max_pages_per_list": 20,
   "page_delay_seconds": 2.0,
-  "tmdb_delay_seconds": 0.06,
+  "lookup_delay_seconds": 0.05,
   "tmdb_language": "en-US"
 }

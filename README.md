@@ -18,9 +18,11 @@ Your four lists are already in `config.json`.
 
 1. Every `refresh_interval_minutes`, it fetches each IMDb list page and pulls out
    the `tt` ids.
-2. Each id goes to TMDb to get a `tmdbId` (movies) or `tvdbId` (series), because
-   that's what Radarr and Sonarr actually key on. Resolutions are cached in
-   `data/idmap.json` forever — an IMDb id never changes what it points to.
+2. Each id is sent to your own Radarr or Sonarr's `/lookup` endpoint to get a
+   `tmdbId` (movies) or `tvdbId` (series), because that's what they key on.
+   Resolutions are cached in `data/idmap.json` forever — an IMDb id never
+   changes what it points to. Failed lookups are *not* cached, so a title isn't
+   lost permanently because Sonarr happened to be restarting.
 3. Results are cached in `data/state.json` and served on the endpoints above.
 
 **If a refresh fails, the last good data keeps being served.** An empty list
@@ -32,9 +34,11 @@ the endpoint returns HTTP 503 so Radarr's Test button fails loudly instead.
 
 ## Install
 
-You need a **TMDb API key** (free): https://www.themoviedb.org/settings/api —
-"API Read Access Token" is not what you want; use the shorter **API Key (v3
-auth)**. You may already have one from the vault poster art.
+No API accounts needed. The script asks your own Radarr and Sonarr to translate
+IMDb ids, using the same metadata sources they already trust.
+
+Grab both API keys: **Radarr → Settings → General → API Key**, and the same in
+Sonarr. Then:
 
 ```bash
 sudo mkdir -p /opt/imdbarr
@@ -42,8 +46,18 @@ sudo cp imdbarr.py config.json /opt/imdbarr/
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin imdbarr
 sudo mkdir -p /opt/imdbarr/data
 sudo chown -R imdbarr:imdbarr /opt/imdbarr
-sudo nano /opt/imdbarr/config.json     # paste your TMDb key
+sudo nano /opt/imdbarr/config.json     # paste both keys, check the URLs
 ```
+
+The `radarr.url` and `sonarr.url` in the config default to `192.168.1.50` on the
+standard ports. Change them if your *arrs live elsewhere. Verify a key works:
+
+```bash
+curl -s -H "X-Api-Key: YOUR_RADARR_KEY" \
+  "http://192.168.1.50:7878/api/v3/movie/lookup?term=imdb:tt0133093" | head -c 200
+```
+
+You should get JSON describing The Matrix. `401` means the key is wrong.
 
 ### Check the scraper before installing the service
 
@@ -96,7 +110,9 @@ Status page: `http://<container-ip>:8586/`
 {
   "port": 8586,
   "refresh_interval_minutes": 360,   // how often to re-scrape IMDb
-  "tmdb_api_key": "...",
+  "resolver": "arr",                 // "arr" = ask Radarr/Sonarr; "tmdb" = use TMDb
+  "radarr": { "url": "http://192.168.1.50:7878", "api_key": "..." },
+  "sonarr": { "url": "http://192.168.1.50:8989", "api_key": "..." },
   "lists": [
     {
       "name": "Movies",              // label on the status page
@@ -162,9 +178,17 @@ binds correctly either way rather than silently importing zero items.
 browser. 503 means no successful scrape yet; check `journalctl -u imdbarr`.
 
 **Some titles never appear** — the status page shows an "unmatched" count. Those
-are titles TMDb couldn't resolve from the IMDb id, common with obscure anime.
-`data/state.json` lists them under `unresolved`. Usually fixable by adding the
-IMDb id to the title on TMDb itself.
+are titles your *arr couldn't resolve from the IMDb id, most common with obscure
+anime. `data/state.json` lists them under `unresolved`. Search the title manually
+in Radarr/Sonarr: if it can't find it there either, the metadata source is
+missing the IMDb mapping, which is fixable by adding it on TMDb or TheTVDB.
+
+**Lookups all fail at once** — the *arr is down, the URL is wrong, or the key is.
+Check `journalctl -u imdbarr`. Previously-resolved titles keep working from cache,
+so only new additions stall.
+
+**Prefer not to depend on the *arrs?** Set `"resolver": "tmdb"` and supply
+`tmdb_api_key`. That path still works; it just needs a TMDb developer account.
 
 **IMDb starts returning 403** — they've tightened bot detection. Try a fresher
 `user_agent` string in the config first. If that fails, the fallback is exporting
